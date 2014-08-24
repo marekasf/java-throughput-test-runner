@@ -1,7 +1,7 @@
 java-throughput-test-runner
 ===========================
 
-Measures throughput of Java service called from many threads concurrently. It supports asynchronous services returning [rxJava](https://rx.codeplex.com/) observables.
+Measures throughput of Java service called from many threads concurrently. It is designed for asynchronous services returning [rxJava](https://rx.codeplex.com/) observables, but also can be used for synchronous services (see example).
 It generates statistics, histogram, histogram image.
  
 It is built with:
@@ -13,7 +13,7 @@ It is built with:
 
 #### Configuration options 
 
-- **action** *Supplier<Observable<?>>* action too be tested.
+- **action** *Supplier\<Observable\<?\>\>* action to be tested. Execution time will be tested. Execution is measured from [subscribe()](https://github.com/ReactiveX/RxJava/wiki/Observable-Utility-Operators#doonsubscribe) to [onCompleted](https://github.com/ReactiveX/RxJava/wiki/Observable-Utility-Operators#dooncompleted).
 - **threads** number of threads *action* will be executed simultaneously.
 - **testTimeInSeconds** total time test will be run.
 - **histogram** should generate histogram? (See example report). 
