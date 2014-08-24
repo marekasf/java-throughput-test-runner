@@ -13,7 +13,7 @@ It is built with:
 
 #### Configuration options 
 
-- **action** *Supplier\<Observable\<?\>\>* action to be tested. Execution time will be tested. Execution is measured from [subscription](https://github.com/ReactiveX/RxJava/wiki/Observable-Utility-Operators#doonsubscribe) to [completion](https://github.com/ReactiveX/RxJava/wiki/Observable-Utility-Operators#dooncompleted).
+- **action** *[Supplier\<Observable\<?\>\>](http://download.java.net/lambda/b78/docs/api/java/util/function/Supplier.html)* action to be tested. Execution time will be tested. Execution is measured from [subscription](https://github.com/ReactiveX/RxJava/wiki/Observable-Utility-Operators#doonsubscribe) to [completion](https://github.com/ReactiveX/RxJava/wiki/Observable-Utility-Operators#dooncompleted).
 - **threads** number of threads *action* will be executed simultaneously.
 - **testTimeInSeconds** total time test will be run.
 - **histogram** should generate histogram? (See example report). 
