@@ -42,7 +42,7 @@ mvn install
 	<dependency>
 		<groupId>org.marekasf</groupId>
 		<artifactId>java-throughput-test-runner</artifactId>
-		<version>0.0.1-SNAPSHOT</version>
+		<version>0.0.1</version>
 		<scope>test</scope>
 	</dependency>
 ```
