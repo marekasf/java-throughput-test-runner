@@ -157,18 +157,15 @@ public class ThroughputRunner
 				{
 					final Observable<?> observable = action.get();
 
-					observable.toList().doOnCompleted(() -> {
-						final long time = System.currentTimeMillis() - start;
-						max(maxRequestTimeMs, time);
-						totalRequestTimeMs.add(time);
-						requestCount.increment();
-						histogram.addValue(time);
-					}).doOnError(t -> {
-						errorCount.increment();
-						errors.putIfAbsent(t.getMessage() == null ? "" : t.getMessage(), t);
-						increment(errorsHistogram, t.getMessage() == null ? "" : t.getMessage());
-					}).subscribe();
-					// .toBlocking().first();
+					observable.toList().subscribe( //
+							list -> registerExecution(start, maxRequestTimeMs, totalRequestTimeMs, requestCount, histogram), //
+							throwable -> {
+								registerExecution(start, maxRequestTimeMs, totalRequestTimeMs, requestCount, histogram);
+								errorCount.increment();
+								errors.putIfAbsent(throwable.getMessage() == null ? "" : throwable.getMessage(), throwable);
+								increment(errorsHistogram, throwable.getMessage() == null ? "" : throwable.getMessage());
+							});
+
 					sample = System.currentTimeMillis() - start;
 				}
 				catch (Throwable t)
@@ -232,6 +229,16 @@ public class ThroughputRunner
 				XYHistogramChart.display(histogram, "Request time (ms)");
 			}
 		}
+	}
+
+	private void registerExecution(final long start, final AtomicLong maxRequestTimeMs, final LongAdder totalRequestTimeMs,
+			final LongAdder requestCount, final AdaptiveHistogram histogram)
+	{
+		final long time = System.currentTimeMillis() - start;
+		max(maxRequestTimeMs, time);
+		totalRequestTimeMs.add(time);
+		requestCount.increment();
+		histogram.addValue(time);
 	}
 
 	private void print(final String text)

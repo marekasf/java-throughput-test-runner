@@ -16,9 +16,9 @@
 
 	<dependencies>
 		<dependency>
-			<groupId>com.netflix.rxjava</groupId>
-			<artifactId>rxjava-core</artifactId>
-			<version>0.19.6</version>
+			<groupId>io.reactivex</groupId>
+			<artifactId>rxjava</artifactId>
+			<version>1.0.4</version>
 		</dependency>
 		<dependency>
 			<groupId>org.slf4j</groupId>
