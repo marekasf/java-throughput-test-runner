@@ -28,6 +28,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import rx.Observable;
+import rx.Scheduler;
+import rx.schedulers.Schedulers;
 
 public class ThroughputRunner
 {
@@ -146,7 +148,9 @@ public class ThroughputRunner
 
 		final AdaptiveHistogram histogram = new AdaptiveHistogram();
 
-		final ExecutorService executorService = Executors.newFixedThreadPool(threads);
+		final ExecutorService executorService = Executors.newFixedThreadPool(threads + 16);
+
+		final Scheduler scheduler = Schedulers.from(executorService);
 
 		IntStream.range(0, threads).forEach(v -> executorService.execute(() -> {
 			do
@@ -157,14 +161,14 @@ public class ThroughputRunner
 				{
 					final Observable<?> observable = action.get();
 
-					observable.toList().subscribe( //
-							list -> registerExecution(start, maxRequestTimeMs, totalRequestTimeMs, requestCount, histogram), //
-							throwable -> {
-								registerExecution(start, maxRequestTimeMs, totalRequestTimeMs, requestCount, histogram);
-								errorCount.increment();
-								errors.putIfAbsent(throwable.getMessage() == null ? "" : throwable.getMessage(), throwable);
-								increment(errorsHistogram, throwable.getMessage() == null ? "" : throwable.getMessage());
-							});
+					observable.observeOn(scheduler).toList().subscribe( //
+						list -> registerExecution(start, maxRequestTimeMs, totalRequestTimeMs, requestCount, histogram), //
+						throwable -> {
+							registerExecution(start, maxRequestTimeMs, totalRequestTimeMs, requestCount, histogram);
+							errorCount.increment();
+							errors.putIfAbsent(throwable.getMessage() == null ? "" : throwable.getMessage(), throwable);
+							increment(errorsHistogram, throwable.getMessage() == null ? "" : throwable.getMessage());
+						});
 
 					sample = System.currentTimeMillis() - start;
 				}
