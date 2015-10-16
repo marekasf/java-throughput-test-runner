@@ -29,11 +29,15 @@ import org.slf4j.LoggerFactory;
 
 import rx.Observable;
 import rx.Scheduler;
+import rx.functions.Action0;
 import rx.schedulers.Schedulers;
 
 public class ThroughputRunner
 {
 	private static final Logger LOG = LoggerFactory.getLogger(ThroughputRunner.class);
+
+	protected volatile String lastLog;
+
 	public static final BiConsumer<String, Throwable> SYSOUT = (t, e) -> {
 		if (e == null)
 		{
@@ -58,6 +62,56 @@ public class ThroughputRunner
 		return Builder.create(action);
 	}
 
+	public class Daemon
+	{
+		private Action0 runner;
+		private volatile boolean started = false;
+
+		private Daemon(final Action0 runner)
+		{
+			this.runner = runner;
+		}
+
+		public String log()
+		{
+			return ThroughputRunner.this.lastLog;
+		}
+
+		public String histogram()
+		{
+			return ThroughputRunner.this.printHistogram();
+		}
+
+		public String errors()
+		{
+			return ThroughputRunner.this.printErrors();
+		}
+
+		public void start()
+		{
+			synchronized (this)
+			{
+				if (!started)
+				{
+					final Scheduler.Worker worker = Schedulers.io().createWorker();
+					worker.schedule(runner);
+					started = true;
+				}
+			}
+		}
+
+		public void stop()
+		{
+			synchronized (this)
+			{
+				if (started)
+				{
+					ThroughputRunner.this.stop();
+				}
+			}
+		}
+	}
+
 	public static class Builder
 	{
 		private Supplier<Observable<?>> action;
@@ -66,6 +120,7 @@ public class ThroughputRunner
 		private boolean histogram = true;
 		private boolean histogramGraph = true;
 		private BiConsumer<String, Throwable> printer = LOG::error;
+		private int logSleepSeconds = 1;
 
 		public Builder action(final Supplier<Observable<?>> action)
 		{
@@ -118,38 +173,77 @@ public class ThroughputRunner
 			return this;
 		}
 
-		public void run()
+		public Builder logSleepSeconds(final int logSleepSeconds)
+		{
+			this.logSleepSeconds = logSleepSeconds;
+			return this;
+		}
+
+		private void performance(final ThroughputRunner throughputRunner)
 		{
 			try
 			{
-				new ThroughputRunner(printer).performance(threads, testTimeInSeconds, action, histogram, histogramGraph);
+				throughputRunner.performance(threads, testTimeInSeconds, action, histogram, histogramGraph, logSleepSeconds);
 			}
 			catch (InterruptedException e)
 			{
 				throw new RuntimeException(e);
 			}
 		}
+
+		public void run()
+		{
+			final ThroughputRunner throughputRunner = new ThroughputRunner(printer);
+			performance(throughputRunner);
+		}
+
+		public Daemon daemon()
+		{
+			final ThroughputRunner throughputRunner = new ThroughputRunner(printer);
+			return throughputRunner.daemon(() -> performance(throughputRunner));
+		}
 	}
 
+	private Daemon daemon(final Action0 runner)
+	{
+		return new Daemon(runner);
+	}
+
+	private final LongAdder requestCount = new LongAdder();
+	private final LongAdder loopCount = new LongAdder();
+	private final LongAdder errorCount = new LongAdder();
+	private final LongAdder totalRequestTimeMs = new LongAdder();
+	private final LongAdder totalLoopTimeMs = new LongAdder();
+	private final AtomicLong maxRequestTimeMs = new AtomicLong();
+
+	private final AtomicBoolean test = new AtomicBoolean(true);
+	private final ConcurrentHashMap<String, Throwable> errors = new ConcurrentHashMap<>();
+	private final ConcurrentHashMap<String, LongAdder> errorsHistogram = new ConcurrentHashMap<>();
+	private volatile AdaptiveHistogram histogram = null;
+
+	protected void stop()
+	{
+		test.set(false);
+	}
 
 	protected void performance(final int threads, final int testTimeInSeconds, final Supplier<Observable<?>> action,
-			final boolean displayHistogram, final boolean displayHistogramGraph) throws InterruptedException
+			final boolean displayHistogram, final boolean displayHistogramGraph, final int logSleepSeconds)
+			throws InterruptedException
 	{
-		final LongAdder requestCount = new LongAdder();
-		final LongAdder loopCount = new LongAdder();
-		final LongAdder errorCount = new LongAdder();
-		final LongAdder totalRequestTimeMs = new LongAdder();
-		final LongAdder totalLoopTimeMs = new LongAdder();
-		final AtomicLong maxRequestTimeMs = new AtomicLong();
+		requestCount.reset();
+		loopCount.reset();
+		errorCount.reset();
+		totalRequestTimeMs.reset();
+		totalLoopTimeMs.reset();
+		maxRequestTimeMs.set(0);
 
-		final AtomicBoolean test = new AtomicBoolean(true);
-		final ConcurrentHashMap<String, Throwable> errors = new ConcurrentHashMap<>();
-		final ConcurrentHashMap<String, LongAdder> errorsHistogram = new ConcurrentHashMap<>();
+		test.set(true);
+		errors.clear();
+		errorsHistogram.clear();
 
-		final AdaptiveHistogram histogram = new AdaptiveHistogram();
+		histogram = new AdaptiveHistogram();
 
 		final ExecutorService executorService = Executors.newFixedThreadPool(threads + 16);
-
 		final Scheduler scheduler = Schedulers.from(executorService);
 
 		IntStream.range(0, threads).forEach(v -> executorService.execute(() -> {
@@ -162,13 +256,13 @@ public class ThroughputRunner
 					final Observable<?> observable = action.get();
 
 					observable.observeOn(scheduler).toList().subscribe( //
-						list -> registerExecution(start, maxRequestTimeMs, totalRequestTimeMs, requestCount, histogram), //
-						throwable -> {
-							registerExecution(start, maxRequestTimeMs, totalRequestTimeMs, requestCount, histogram);
-							errorCount.increment();
-							errors.putIfAbsent(throwable.getMessage() == null ? "" : throwable.getMessage(), throwable);
-							increment(errorsHistogram, throwable.getMessage() == null ? "" : throwable.getMessage());
-						});
+							list -> registerExecution(start, maxRequestTimeMs, totalRequestTimeMs, requestCount, histogram), //
+							throwable -> {
+								registerExecution(start, maxRequestTimeMs, totalRequestTimeMs, requestCount, histogram);
+								errorCount.increment();
+								errors.putIfAbsent(throwable.getMessage() == null ? "" : throwable.getMessage(), throwable);
+								increment(errorsHistogram, throwable.getMessage() == null ? "" : throwable.getMessage());
+							});
 
 					sample = System.currentTimeMillis() - start;
 				}
@@ -190,49 +284,91 @@ public class ThroughputRunner
 
 		do
 		{
-			Thread.sleep(1000);
+			Thread.sleep(logSleepSeconds * 1000);
 			final long testTimeMs = System.currentTimeMillis() - start;
 
 			final double avgExecTimeMs = totalRequestTimeMs.doubleValue() / requestCount.doubleValue();
-			print("");
-			print("Sample results :");
-			print(" - request rate  : " + (requestCount.doubleValue() * 1000. / testTimeMs) + " r/s");
-			print(" - error rate    : " + (errorCount.doubleValue() * 1000. / testTimeMs) + " e/s");
-			print(" - max exec time : " + maxRequestTimeMs.get() + " ms");
-			print(" - avg exec time : " + avgExecTimeMs + " ms\n");
-		} while (System.currentTimeMillis() < end);
+
+
+			str().print(""). //
+					print("Sample results :"). //
+					print(" - request rate  : " + (requestCount.doubleValue() * 1000. / testTimeMs) + " r/s"). //
+					print(" - error rate    : " + (errorCount.doubleValue() * 1000. / testTimeMs) + " e/s"). //
+					print(" - max exec time : " + maxRequestTimeMs.get() + " ms"). //
+					print(" - avg exec time : " + avgExecTimeMs + " ms\n"). //
+					flush();
+		} while (test.get() && (end == 0 || System.currentTimeMillis() < end));
 
 		test.set(false);
 		executorService.shutdown();
 
-		print("\n");
-		print("ERRORS " + errors.size() + " of " + errorCount.longValue());
-		errors.entrySet().stream().forEach(e -> print(errorsHistogram.get(e.getKey()).longValue() + " times : " + e.getKey(),
-				e.getValue()));
+		printErrors();
 
 		final double avgExecTimeMs = totalRequestTimeMs.doubleValue() / requestCount.doubleValue();
 
-		print("\n");
-		print("REQUESTS: " + requestCount.longValue() + ", ERRORS: " + errorCount
+		str().print("\n"). //
+				print("REQUESTS: " + requestCount.longValue() + ", ERRORS: " + errorCount
 				.longValue() + ", TOTAL_EXEC_TIME_MS: " + totalRequestTimeMs
-				.longValue() + ", TOTAL_LOOP_TIME_MS: " + totalLoopTimeMs.longValue() + ", LOOPS: " + loopCount.longValue());
-		print("  request rate  : " + (requestCount.doubleValue() / testTimeInSeconds) + " r/s");
-		print("  error rate    : " + (errorCount.doubleValue() / testTimeInSeconds) + " e/s");
-		print("  max exec time : " + maxRequestTimeMs.get() + " ms");
-		print("  avg exec time : " + avgExecTimeMs + " ms");
-		print("  avg loop time : " + (totalLoopTimeMs.doubleValue() / (requestCount.doubleValue() + errorCount
-				.doubleValue())) + " ms");
-		print("  thread rate   : " + (1000. / avgExecTimeMs) + " r/s");
-		print("  effective req : " + (testTimeInSeconds * 1000. / requestCount.doubleValue()) + " ms\n");
+				.longValue() + ", TOTAL_LOOP_TIME_MS: " + totalLoopTimeMs.longValue() + ", LOOPS: " + loopCount.longValue()). //
+				print("  request rate  : " + (requestCount.doubleValue() / testTimeInSeconds) + " r/s"). //
+				print("  error rate    : " + (errorCount.doubleValue() / testTimeInSeconds) + " e/s"). //
+				print("  max exec time : " + maxRequestTimeMs.get() + " ms"). //
+				print("  avg exec time : " + avgExecTimeMs + " ms"). //
+				print("  avg loop time : " + (totalLoopTimeMs.doubleValue() / (requestCount.doubleValue() + errorCount
+				.doubleValue())) + " ms"). //
+				print("  thread rate   : " + (1000. / avgExecTimeMs) + " r/s"). //
+				print("  effective req : " + (testTimeInSeconds * 1000. / requestCount.doubleValue()) + " ms\n"). //
+				flush();
 
 		if (displayHistogram)
 		{
-			printHistogram(histogram);
+			printHistogram();
 			if (displayHistogramGraph)
 			{
 				XYHistogramChart.display(histogram, "Request time (ms)");
 			}
 		}
+	}
+
+	private class Printer
+	{
+		private StringBuilder buf = new StringBuilder();
+
+		public Printer print(final String s)
+		{
+			buf.append(s).append('\n');
+			return this;
+		}
+
+		public void print(final String s, final Throwable value)
+		{
+			buf.append(s).append(" >> ").append(value).append('\n');
+			ThroughputRunner.this.print(s, value);
+		}
+
+		@Override
+		public String toString()
+		{
+			return buf.toString();
+		}
+
+		public Printer flush()
+		{
+			final String text = this.toString();
+			if (text != null && text.length() > 0)
+			{
+				ThroughputRunner.this.lastLog = text;
+				ThroughputRunner.this.print(text, null);
+				buf.delete(0, buf.length());
+			}
+			return this;
+		}
+
+	}
+
+	private Printer str()
+	{
+		return new Printer();
 	}
 
 	private void registerExecution(final long start, final AtomicLong maxRequestTimeMs, final LongAdder totalRequestTimeMs,
@@ -245,12 +381,7 @@ public class ThroughputRunner
 		histogram.addValue(time);
 	}
 
-	private void print(final String text)
-	{
-		print(text, null);
-	}
-
-	private void print(final String text, final Throwable t)
+	protected void print(final String text, final Throwable t)
 	{
 		printer.accept(text, t);
 	}
@@ -278,19 +409,45 @@ public class ThroughputRunner
 		}
 	}
 
-	private void printHistogram(final AdaptiveHistogram h)
+	protected String printErrors()
 	{
-		print("\n");
-		print("Main percentiles (action execution time):");
-		print("   5%: " + h.getValueForPercentile(5) + " ms");
-		print("  25%: " + h.getValueForPercentile(25) + " ms");
-		print("  50%: " + h.getValueForPercentile(50) + " ms");
-		print("  75%: " + h.getValueForPercentile(75) + " ms");
-		print("  80%: " + h.getValueForPercentile(80) + " ms");
-		print("  85%: " + h.getValueForPercentile(85) + " ms");
-		print("  90%: " + h.getValueForPercentile(90) + " ms");
-		print("  95%: " + h.getValueForPercentile(95) + " ms");
-		print("  99%: " + h.getValueForPercentile(99) + " ms");
-		print("\n");
+		final Printer p = str().print("\n"). //
+				print("ERRORS " + errors.size() + " of " + errorCount.longValue());
+
+		errors.entrySet().stream().forEach(e -> p.print(errorsHistogram.get(e.getKey()).longValue() + " times : " + e.getKey(),
+				e.getValue()));
+
+		final String txt = p.toString();
+		p.flush();
+
+		return txt;
+	}
+
+	protected String printHistogram()
+	{
+		final AdaptiveHistogram h = histogram;
+		final Printer print = str();
+
+		if (h != null)
+		{
+			print.print("\n"). //
+					print("Main percentiles (action execution time):"). //
+					print("   5%: " + h.getValueForPercentile(5) + " ms"). //
+					print("  25%: " + h.getValueForPercentile(25) + " ms"). //
+					print("  50%: " + h.getValueForPercentile(50) + " ms"). //
+					print("  75%: " + h.getValueForPercentile(75) + " ms"). //
+					print("  80%: " + h.getValueForPercentile(80) + " ms"). //
+					print("  85%: " + h.getValueForPercentile(85) + " ms"). //
+					print("  90%: " + h.getValueForPercentile(90) + " ms"). //
+					print("  95%: " + h.getValueForPercentile(95) + " ms"). //
+					print("  99%: " + h.getValueForPercentile(99) + " ms"). //
+					print("\n");
+		}
+
+		final String out = print.toString();
+		print.flush();
+
+
+		return out;
 	}
 }
