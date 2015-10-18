@@ -66,6 +66,7 @@ public class ThroughputRunner
 	{
 		private Action0 runner;
 		private volatile boolean started = false;
+		private volatile long start;
 
 		private Daemon(final Action0 runner)
 		{
@@ -87,6 +88,11 @@ public class ThroughputRunner
 			return ThroughputRunner.this.printErrors();
 		}
 
+		public String stats()
+		{
+			return ThroughputRunner.this.printStats(Math.max((int) (System.currentTimeMillis() - start) / 1000, 1));
+		}
+
 		public void start()
 		{
 			synchronized (this)
@@ -95,7 +101,8 @@ public class ThroughputRunner
 				{
 					final Scheduler.Worker worker = Schedulers.io().createWorker();
 					worker.schedule(runner);
-					started = true;
+					this.start = System.currentTimeMillis();
+					this.started = true;
 				}
 			}
 		}
@@ -121,6 +128,7 @@ public class ThroughputRunner
 		private boolean histogramGraph = true;
 		private BiConsumer<String, Throwable> printer = LOG::error;
 		private int logSleepSeconds = 1;
+		private boolean stress = true;
 
 		public Builder action(final Supplier<Observable<?>> action)
 		{
@@ -179,15 +187,22 @@ public class ThroughputRunner
 			return this;
 		}
 
+		public Builder stress(final boolean stress)
+		{
+			this.stress = stress;
+			return this;
+		}
+
 		private void performance(final ThroughputRunner throughputRunner)
 		{
 			try
 			{
-				throughputRunner.performance(threads, testTimeInSeconds, action, histogram, histogramGraph, logSleepSeconds);
+				throughputRunner.performance(threads, testTimeInSeconds, action, histogram, histogramGraph, logSleepSeconds,
+						stress);
 			}
 			catch (InterruptedException e)
 			{
-				throw new RuntimeException(e);
+				throw new RuntimeException("Performance test interrupted", e);
 			}
 		}
 
@@ -200,7 +215,16 @@ public class ThroughputRunner
 		public Daemon daemon()
 		{
 			final ThroughputRunner throughputRunner = new ThroughputRunner(printer);
-			return throughputRunner.daemon(() -> performance(throughputRunner));
+			return throughputRunner.daemon(() -> {
+				try
+				{
+					performance(throughputRunner);
+				}
+				catch (Throwable t)
+				{
+					LOG.error("\n\n\n\nDAEMON FAILED", t);
+				}
+			});
 		}
 	}
 
@@ -227,7 +251,7 @@ public class ThroughputRunner
 	}
 
 	protected void performance(final int threads, final int testTimeInSeconds, final Supplier<Observable<?>> action,
-			final boolean displayHistogram, final boolean displayHistogramGraph, final int logSleepSeconds)
+			final boolean displayHistogram, final boolean displayHistogramGraph, final int logSleepSeconds, final boolean stress)
 			throws InterruptedException
 	{
 		requestCount.reset();
@@ -253,20 +277,36 @@ public class ThroughputRunner
 				long sample;
 				try
 				{
-					final Observable<?> observable = action.get();
-
-					observable.observeOn(scheduler).toList().subscribe( //
-							list -> registerExecution(start, maxRequestTimeMs, totalRequestTimeMs, requestCount, histogram), //
-							throwable -> {
+					final Observable<?> observable = action.get() //
+							.observeOn(scheduler) //
+							.doOnCompleted(() -> registerExecution(start, maxRequestTimeMs, totalRequestTimeMs, requestCount,
+									histogram)) //
+							.doOnError(throwable -> {
 								registerExecution(start, maxRequestTimeMs, totalRequestTimeMs, requestCount, histogram);
 								errorCount.increment();
 								errors.putIfAbsent(throwable.getMessage() == null ? "" : throwable.getMessage(), throwable);
 								increment(errorsHistogram, throwable.getMessage() == null ? "" : throwable.getMessage());
 							});
 
+					if (stress)
+					{
+						observable.subscribe();
+					}
+					else
+					{
+						try
+						{
+							observable.toBlocking().lastOrDefault(null);
+						}
+						catch (final Exception e)
+						{
+							// already handled in doOnError
+						}
+					}
+
 					sample = System.currentTimeMillis() - start;
 				}
-				catch (Throwable t)
+				catch (final Throwable t)
 				{
 					sample = System.currentTimeMillis() - start;
 					errorCount.increment();
@@ -282,6 +322,7 @@ public class ThroughputRunner
 		final long start = System.currentTimeMillis();
 		final long end = start + testTimeInSeconds * 1000;
 
+		int i = 0;
 		do
 		{
 			Thread.sleep(logSleepSeconds * 1000);
@@ -297,28 +338,21 @@ public class ThroughputRunner
 					print(" - max exec time : " + maxRequestTimeMs.get() + " ms"). //
 					print(" - avg exec time : " + avgExecTimeMs + " ms\n"). //
 					flush();
-		} while (test.get() && (end == 0 || System.currentTimeMillis() < end));
+
+			if (testTimeInSeconds == 0 && ++i > 16)
+			{
+				i = 0;
+				printHistogram();
+				histogram = new AdaptiveHistogram();
+			}
+		} while (test.get() && (testTimeInSeconds == 0 || System.currentTimeMillis() < end));
 
 		test.set(false);
 		executorService.shutdown();
 
 		printErrors();
 
-		final double avgExecTimeMs = totalRequestTimeMs.doubleValue() / requestCount.doubleValue();
-
-		str().print("\n"). //
-				print("REQUESTS: " + requestCount.longValue() + ", ERRORS: " + errorCount
-				.longValue() + ", TOTAL_EXEC_TIME_MS: " + totalRequestTimeMs
-				.longValue() + ", TOTAL_LOOP_TIME_MS: " + totalLoopTimeMs.longValue() + ", LOOPS: " + loopCount.longValue()). //
-				print("  request rate  : " + (requestCount.doubleValue() / testTimeInSeconds) + " r/s"). //
-				print("  error rate    : " + (errorCount.doubleValue() / testTimeInSeconds) + " e/s"). //
-				print("  max exec time : " + maxRequestTimeMs.get() + " ms"). //
-				print("  avg exec time : " + avgExecTimeMs + " ms"). //
-				print("  avg loop time : " + (totalLoopTimeMs.doubleValue() / (requestCount.doubleValue() + errorCount
-				.doubleValue())) + " ms"). //
-				print("  thread rate   : " + (1000. / avgExecTimeMs) + " r/s"). //
-				print("  effective req : " + (testTimeInSeconds * 1000. / requestCount.doubleValue()) + " ms\n"). //
-				flush();
+		printStats(testTimeInSeconds);
 
 		if (displayHistogram)
 		{
@@ -363,7 +397,6 @@ public class ThroughputRunner
 			}
 			return this;
 		}
-
 	}
 
 	private Printer str()
@@ -421,6 +454,30 @@ public class ThroughputRunner
 		p.flush();
 
 		return txt;
+	}
+
+	protected String printStats(final int testTimeInSeconds)
+	{
+		final double avgExecTimeMs = totalRequestTimeMs.doubleValue() / requestCount.doubleValue();
+		final Printer print = str();
+
+		print.print("\n"). //
+				print("REQUESTS: " + requestCount.longValue() + ", ERRORS: " + errorCount
+				.longValue() + ", TOTAL_EXEC_TIME_MS: " + totalRequestTimeMs
+				.longValue() + ", TOTAL_LOOP_TIME_MS: " + totalLoopTimeMs.longValue() + ", LOOPS: " + loopCount.longValue()). //
+				print("  request rate  : " + (requestCount.doubleValue() / testTimeInSeconds) + " r/s"). //
+				print("  error rate    : " + (errorCount.doubleValue() / testTimeInSeconds) + " e/s"). //
+				print("  max exec time : " + maxRequestTimeMs.get() + " ms"). //
+				print("  avg exec time : " + avgExecTimeMs + " ms"). //
+				print("  avg loop time : " + (totalLoopTimeMs.doubleValue() / (requestCount.doubleValue() + errorCount
+				.doubleValue())) + " ms"). //
+				print("  thread rate   : " + (1000. / avgExecTimeMs) + " r/s"). //
+				print("  effective req : " + (testTimeInSeconds * 1000. / requestCount.doubleValue()) + " ms\n");
+
+		final String out = print.toString();
+		print.flush();
+
+		return out;
 	}
 
 	protected String printHistogram()

@@ -21,7 +21,7 @@ public class DaemonTest
 	@Test
 	public void daemon()
 	{
-		final ThroughputRunner.Daemon daemon = ThroughputRunner.Builder.create().testTimeInSeconds(0).threads(2) //
+		final ThroughputRunner.Daemon daemon = ThroughputRunner.Builder.create().testTimeInSeconds(0).threads(2).stress(false) //
 				.action(() -> Observable.defer(() -> sleep())) //
 				.graph(false).daemon();
 
@@ -33,6 +33,7 @@ public class DaemonTest
 			daemon.log();
 			daemon.errors();
 			daemon.histogram();
+			daemon.stats();
 			daemon.log();
 			sleep();
 		}
@@ -48,7 +49,7 @@ public class DaemonTest
 		}
 		catch (InterruptedException e)
 		{
-			throw new RuntimeException(e);
+			throw new RuntimeException("Daemon interrupted", e);
 		}
 		return Observable.just(true);
 	}
